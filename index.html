@@ -207,41 +207,82 @@ function saveProgress(){
   localStorage.setItem('pkname',playerName);
 }
 
-// ─── LEADERBOARD DATA (localStorage — per device, permanent) ─────────────────
-// Data tersimpan di browser masing-masing. Untuk shared leaderboard antar device,
-// user perlu setup backend sendiri (Firebase/Supabase).
+// ─── LEADERBOARD SHARED (JSONBin.io) ─────────────────────────────────────────
+// SETUP (1x saja):
+//  1. Daftar gratis di https://jsonbin.io
+//  2. Buka Account → API Keys → Create Access Key
+//  3. Buka Bins → Create Bin → isi {"leaderboard":{}} → Create
+//  4. Ganti JSONBIN_KEY dan JSONBIN_BIN_ID di bawah
+//
+// Setelah setup, semua pemain dari device/browser manapun akan berbagi leaderboard yang sama!
 
-const LB_KEY_PREFIX = 'parkour_lb_';
-const LB_MAX = 50;
+const JSONBIN_KEY  = '$2a$10$c/U6NS6DsAsl8/LB2qWajOi3IQq6erfjH.prPcOTZS5B7kzX/kE/y';
+const JSONBIN_BIN  = '6a00590ec0954111d8014821';
+const JSONBIN_BASE = 'https://api.jsonbin.io/v3/b';
+const USE_JSONBIN  = JSONBIN_KEY !== '__JSONBIN_KEY__' && JSONBIN_BIN !== '__JSONBIN_BIN_ID__';
 
-function lbLoadLocal(mode='all'){
-  try{
-    const raw = localStorage.getItem(LB_KEY_PREFIX + mode);
-    if(!raw) return [];
-    const data = JSON.parse(raw);
-    return Object.values(data).sort((a,b)=>b.score-a.score).slice(0,20);
-  }catch(e){ return []; }
-}
+// localStorage sebagai cache & fallback offline
+const LB_LOCAL = 'parkour_lb_cache';
+function localGet(){ try{ return JSON.parse(localStorage.getItem(LB_LOCAL)||'{}'); }catch(e){ return {}; } }
+function localSet(d){ try{ localStorage.setItem(LB_LOCAL, JSON.stringify(d)); }catch(e){} }
 
 async function lbLoad(mode='all'){
-  return lbLoadLocal(mode);
+  if(USE_JSONBIN){
+    try{
+      const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_BIN}/latest`,{
+        headers:{'X-Access-Key':JSONBIN_KEY,'X-Bin-Meta':'false'}
+      });
+      if(res.ok){
+        const data = await res.json();
+        const lb = data.leaderboard || {};
+        // Cache lokal
+        localSet(lb);
+        return Object.values(lb).sort((a,b)=>b.score-a.score).slice(0,20);
+      }
+    }catch(e){ console.warn('jsonbin load error:',e); }
+  }
+  // Fallback: cache lokal
+  return Object.values(localGet()).sort((a,b)=>b.score-a.score).slice(0,20);
 }
 
 async function lbSave(name,score,mode='all'){
   if(!name||!name.trim()||score<=0) return;
   const safeName = name.trim().slice(0,18);
-  const key = LB_KEY_PREFIX + mode;
+  const nameKey  = safeName.toLowerCase().replace(/[^a-z0-9]/g,'_').slice(0,20);
+  const entry    = {name:safeName, score, mode, ts:Date.now()};
+
+  // Update cache lokal dulu (instant)
+  const local = localGet();
+  if(local[nameKey] && local[nameKey].score >= score) return;
+  local[nameKey] = entry;
+  localSet(local);
+
+  if(!USE_JSONBIN) return; // Hanya local jika belum setup JSONBin
+
+  // Upload ke JSONBin
   try{
-    const data = JSON.parse(localStorage.getItem(key)||'{}');
-    const nameKey = safeName.toLowerCase().replace(/[^a-z0-9]/g,'_').slice(0,20);
-    // Hanya simpan jika score lebih tinggi dari sebelumnya
-    if(!data[nameKey] || data[nameKey].score < score){
-      data[nameKey] = {name: safeName, score, mode, ts: Date.now()};
-      // Batasi jumlah entry
-      const sorted = Object.entries(data).sort((a,b)=>b[1].score-a[1].score).slice(0,LB_MAX);
-      localStorage.setItem(key, JSON.stringify(Object.fromEntries(sorted)));
-    }
-  }catch(e){ console.log('lbSave error:',e); }
+    // Baca data cloud terkini
+    const getRes = await fetch(`${JSONBIN_BASE}/${JSONBIN_BIN}/latest`,{
+      headers:{'X-Access-Key':JSONBIN_KEY,'X-Bin-Meta':'false'}
+    });
+    let lb = {};
+    if(getRes.ok){ const d = await getRes.json(); lb = d.leaderboard || {}; }
+
+    // Hanya update jika score lebih tinggi
+    if(lb[nameKey] && lb[nameKey].score >= score) return;
+    lb[nameKey] = entry;
+
+    // Simpan kembali (batasi 200 entry)
+    const sorted = Object.entries(lb).sort((a,b)=>b[1].score-a[1].score).slice(0,200);
+    await fetch(`${JSONBIN_BASE}/${JSONBIN_BIN}`,{
+      method:'PUT',
+      headers:{
+        'Content-Type':'application/json',
+        'X-Access-Key':JSONBIN_KEY
+      },
+      body: JSON.stringify({leaderboard: Object.fromEntries(sorted)})
+    });
+  }catch(e){ console.warn('jsonbin save error:',e); }
 }
 
 // ─── SKINS DEFINITION ───────────────────────────────────────────────────────
